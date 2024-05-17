@@ -686,7 +686,7 @@ def _read_file(path):
   if not os.path.isfile(path):
     path = path + '.gz'
 
-  with hook_compressed(path, 'rt') as f:
+  with hook_compressed(path, 'r') as f:
     file_data = f.read()
   return file_data
 
