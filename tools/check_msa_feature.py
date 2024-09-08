@@ -26,7 +26,7 @@ from absl import logging
 
 
 #from alphafold.data.complex import read_af2c_target_file,initialize_template_feats
-from alphafold.common.residue_constants import restypes
+from alphafold.common.residue_constants import ID_TO_HHBLITS_AA as aa_dict
 
 
 import numpy as np
@@ -42,10 +42,10 @@ flags.DEFINE_integer('num_templates', 0, 'The maximum PDB template to check thei
 FLAGS = flags.FLAGS
 Flag = Type[FLAGS]
 
-
+## previous mapping was incorrect, commented out
 ## number to AA mapping
-aa_dict = {i: restypes[i] for i in range(20)}
-aa_dict[21] = '-'
+#aa_dict = {i: restypes[i] for i in range(20)}
+#aa_dict[21] = '-'
 
 
 ##################################################################################################
@@ -59,7 +59,7 @@ def main(argv):
   features_input_path = argv[1]
 
   if not os.path.exists(features_input_path):
-    raise Exception(f"Error: could not locate feature input file under {feature_dir}" )
+    raise Exception(f"Error: could not locate file {features_input_path}" )
 
   with hook_compressed(features_input_path, "rb") as f:
     mono_feature_dict = None
@@ -68,6 +68,10 @@ def main(argv):
     L = len(mono_feature_dict["residue_index"])
     T = mono_feature_dict["template_all_atom_positions"].shape[0]
     print(f"Info: found msa_depth = {N}, seq_len = {L}, num_templ = {T}")
+
+    target_seq = mono_feature_dict["sequence"][0].decode('utf-8')
+    print(f"Info: target sequence")
+    print(f"Info: {target_seq}")
 
     msa = mono_feature_dict["msa"][:FLAGS.num_msa_seq,:]
     species = mono_feature_dict['msa_species_identifiers'][:FLAGS.num_msa_seq]
