@@ -144,6 +144,8 @@ def predicted_tm_score(
 
   bin_centers = _calculate_bin_centers(breaks)
 
+  #test commit
+
   num_res = int(np.sum(residue_weights))
   # Clip num_res to avoid negative/undefined d0.
   clipped_num_res = max(num_res, 19)
