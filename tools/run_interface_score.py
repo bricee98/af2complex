@@ -38,6 +38,7 @@ flags.DEFINE_float('interface_dist_thres', 4.5, 'The distance threshold in Angst
                     'another heavy atom of residue j in chain B, residues i j are interface residues.'
                     'This is only used to calculate the confidence metrics such as the interface score.', 
                     lower_bound=3.5)
+flags.DEFINE_boolean('benchmark', False, 'Print timing information for each step')
 
 def get_asym_id(target, flags):
   """Defines the sequence of preprocessing steps to get the asym_id feature
@@ -71,8 +72,16 @@ def main(argv):
   if len(argv) > 1:
     raise app.UsageError('Too many command-line arguments.')
 
+  start_time = time.time()
+  target_read_time = 0
+  feature_time = 0
+  score_calc_time = 0
+  cluster_time = 0
+
   # read list of target files to update with pITM metrics
+  read_start = time.time()
   target_lst = af2c.read_af2c_target_file( FLAGS.target_lst_path )
+  target_read_time = time.time() - read_start
 
   for target in target_lst:
     # if complex features were not saved, rebuild them
@@ -103,21 +112,33 @@ def main(argv):
           continue
 
       if FLAGS.model_str in pkl_file:
-        t_0 = time.time()
+        model_start = time.time()
         model_name = os.path.basename( pkl_file ).split(".")[0]
         model_config = config.model_config(pkl_file[:7])
         breaks = np.linspace(
           0., model_config.model.heads.predicted_aligned_error.max_error_bin,
           model_config.model.heads.predicted_aligned_error.num_bins - 1)
+        
+        # Time pickle loading
+        pkl_start = time.time()
         pkl_path = os.path.join(target_dir, pkl_file)
         try:
             result = pickle.load(open(pkl_path, "rb"))
         except (EOFError,IOError) as error:
             print(f"Warning: {target_name} {error} encountered, check the pickle file")
             continue
+        pkl_time = time.time() - pkl_start
 
+        # Time feature processing
+        feat_start = time.time() 
+        join_chains_time_start = time.time()
         super_asym_id, superid2chainids = confidence.join_superchains_asym_id(asym_id, target['asym_id_list'])
+        join_chains_time = time.time() - join_chains_time_start
+        feature_time += time.time() - feat_start
 
+        # Time interface score calculation
+        score_start = time.time()
+        interface_score_time_start = time.time()
         res = confidence.interface_score(
           result['aligned_confidence_probs'],
           breaks,
@@ -126,6 +147,8 @@ def main(argv):
           super_asym_id,
           distance_threshold=FLAGS.interface_dist_thres,
           is_probs=True)
+        interface_score_time = time.time() - interface_score_time_start
+        score_calc_time += time.time() - score_start
 
         ptm = result['ptm'].tolist()
         pitm = result['pitm']['score'].tolist()
@@ -139,6 +162,8 @@ def main(argv):
             f"piTM-score = {pitm:.4f}, iRes = {inter_residues:<4d}, iCnt = {inter_contacts:<4.0f}, interface-score = {inter_sc:.4f}",)
 
         if FLAGS.do_cluster_analysis:
+          cluster_start = time.time()
+          cluster_analysis_time_start = time.time()
           clus_res = confidence.cluster_analysis(
             super_asym_id,
             result['structure_module']['final_atom_positions'],
@@ -146,6 +171,9 @@ def main(argv):
             edge_contacts_thres=FLAGS.cluster_edge_thres,
             superid2chainids=superid2chainids,
           )
+          cluster_analysis_time = time.time() - cluster_analysis_time_start
+          cluster_time += time.time() - cluster_start
+
           cluster_identities = []
           for cluster in clus_res['clusters']:
             cluster_identities.append([idx2chain_name[c] for c in cluster])
@@ -153,7 +181,17 @@ def main(argv):
           print(f"Info: num_clusters = {clus_res['num_clusters']}, cluster_sizes = {clus_res['cluster_size']}, ",
               f"clusters = {cluster_identities}\n")
           
-        logging.info('Interface score calculation time spent: %.1f seconds', time.time() - t_0)
+        if FLAGS.benchmark:
+          print("\nTiming Information:")
+          print(f"  Model processing time: {time.time() - model_start:.3f}s")
+          print(f"    - Pickle loading: {pkl_time:.3f}s")
+          print(f"    - Feature processing: {time.time() - feat_start:.3f}s")
+          print(f"      * join_superchains_asym_id: {join_chains_time:.3f}s")
+          print(f"    - Score calculation: {time.time() - score_start:.3f}s")
+          print(f"      * interface_score: {interface_score_time:.3f}s")
+          if FLAGS.do_cluster_analysis:
+            print(f"    - Cluster analysis: {time.time() - cluster_start:.3f}s")
+            print(f"      * cluster_analysis: {cluster_analysis_time:.3f}s")
 
         '''
         fields   = model_name.split('_')
@@ -183,6 +221,16 @@ def main(argv):
           with open(json_path, 'w') as f:
             f.write(json.dumps(stats, sort_keys=True, indent=4))
         '''
+
+  if FLAGS.benchmark:
+    total_time = time.time() - start_time
+    print("\nOverall Timing Summary:")
+    print(f"Total execution time: {total_time:.3f}s")
+    print(f"Target file reading: {target_read_time:.3f}s")
+    print(f"Feature processing total: {feature_time:.3f}s")
+    print(f"Score calculation total: {score_calc_time:.3f}s")
+    if FLAGS.do_cluster_analysis:
+      print(f"Cluster analysis total: {cluster_time:.3f}s")
 
 if __name__ == '__main__':
   flags.mark_flags_as_required([

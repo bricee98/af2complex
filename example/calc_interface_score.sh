@@ -12,9 +12,16 @@ af_dir=../src
 
 cluster_edge_thres=10
 
+# Add benchmark flag if passed as argument
+benchmark_flag=""
+if [ "$1" == "--benchmark" ]; then
+    benchmark_flag="--benchmark"
+fi
+
 python -u ../tools/run_interface_score.py \
   --target_lst_path=$target_lst_file \
   --output_dir=$out_dir \
   --feature_dir=$fea_dir \
   --do_cluster_analysis \
   --cluster_edge_thres=$cluster_edge_thres \
+  $benchmark_flag
