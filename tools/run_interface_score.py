@@ -129,6 +129,8 @@ def main(argv):
             continue
         pkl_time = time.time() - pkl_start
 
+        print("Loaded pickle file, start processing test loop")
+
         loop_start = time.time()
 
         for i in range(0, 1000000):
