@@ -109,9 +109,11 @@ def main(argv):
     for pkl_file in os.listdir(target_dir):
       # find all pickle files
       if not pkl_file.endswith(".pkl"):
+          print("Not a pickle file")
           continue
 
-      if FLAGS.model_str in pkl_file:
+      if True:
+        print("Found a pickle file")
         model_start = time.time()
         model_name = os.path.basename( pkl_file ).split(".")[0]
         model_config = config.model_config(pkl_file[:7])
@@ -133,7 +135,7 @@ def main(argv):
 
         loop_start = time.time()
 
-        for i in range(0, 1000000):
+        for i in range(0, 1000):
 
           # Time feature processing
           feat_start = time.time() 
