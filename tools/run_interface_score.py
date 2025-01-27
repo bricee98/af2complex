@@ -129,57 +129,61 @@ def main(argv):
             continue
         pkl_time = time.time() - pkl_start
 
-        # Time feature processing
-        feat_start = time.time() 
-        join_chains_time_start = time.time()
-        super_asym_id, superid2chainids = confidence.join_superchains_asym_id(asym_id, target['asym_id_list'])
-        join_chains_time = time.time() - join_chains_time_start
-        feature_time += time.time() - feat_start
+        loop_start = time.time()
 
-        # Time interface score calculation
-        score_start = time.time()
-        interface_score_time_start = time.time()
-        res = confidence.interface_score(
-          result['aligned_confidence_probs'],
-          breaks,
-          result['structure_module']['final_atom_positions'],
-          result['structure_module']['final_atom_mask'],
-          super_asym_id,
-          distance_threshold=FLAGS.interface_dist_thres,
-          is_probs=True)
-        interface_score_time = time.time() - interface_score_time_start
-        score_calc_time += time.time() - score_start
+        for i in range(0, 1000000):
 
-        ptm = result['ptm'].tolist()
-        pitm = result['pitm']['score'].tolist()
-        iptm = result['iptm+ptm'].tolist()
+          # Time feature processing
+          feat_start = time.time() 
+          join_chains_time_start = time.time()
+          super_asym_id, superid2chainids = confidence.join_superchains_asym_id(asym_id, target['asym_id_list'])
+          join_chains_time = time.time() - join_chains_time_start
+          feature_time += time.time() - feat_start
 
-        inter_sc = res['score'].tolist()
-        inter_residues = res['num_residues'].tolist()
-        inter_contacts = res['num_contacts'].tolist()
-
-        print(f"Info: {target_name} (chains: {full_name}) {model_name}  iptm+ptm = {iptm:.4f}, ",
-            f"piTM-score = {pitm:.4f}, iRes = {inter_residues:<4d}, iCnt = {inter_contacts:<4.0f}, interface-score = {inter_sc:.4f}",)
-
-        if FLAGS.do_cluster_analysis:
-          cluster_start = time.time()
-          cluster_analysis_time_start = time.time()
-          clus_res = confidence.cluster_analysis(
-            super_asym_id,
+          # Time interface score calculation
+          score_start = time.time()
+          interface_score_time_start = time.time()
+          res = confidence.interface_score(
+            result['aligned_confidence_probs'],
+            breaks,
             result['structure_module']['final_atom_positions'],
             result['structure_module']['final_atom_mask'],
-            edge_contacts_thres=FLAGS.cluster_edge_thres,
-            superid2chainids=superid2chainids,
-          )
-          cluster_analysis_time = time.time() - cluster_analysis_time_start
-          cluster_time += time.time() - cluster_start
+            super_asym_id,
+            distance_threshold=FLAGS.interface_dist_thres,
+            is_probs=True)
+          interface_score_time = time.time() - interface_score_time_start
+          score_calc_time += time.time() - score_start
 
-          cluster_identities = []
-          for cluster in clus_res['clusters']:
-            cluster_identities.append([idx2chain_name[c] for c in cluster])
+          ptm = result['ptm'].tolist()
+          pitm = result['pitm']['score'].tolist()
+          iptm = result['iptm+ptm'].tolist()
 
-          print(f"Info: num_clusters = {clus_res['num_clusters']}, cluster_sizes = {clus_res['cluster_size']}, ",
-              f"clusters = {cluster_identities}\n")
+          inter_sc = res['score'].tolist()
+          inter_residues = res['num_residues'].tolist()
+          inter_contacts = res['num_contacts'].tolist()
+
+          #print(f"Info: {target_name} (chains: {full_name}) {model_name}  iptm+ptm = {iptm:.4f}, ",
+          # f"piTM-score = {pitm:.4f}, iRes = {inter_residues:<4d}, iCnt = {inter_contacts:<4.0f}, interface-score = {inter_sc:.4f}",)
+
+          if FLAGS.do_cluster_analysis:
+            cluster_start = time.time()
+            cluster_analysis_time_start = time.time()
+            clus_res = confidence.cluster_analysis(
+              super_asym_id,
+              result['structure_module']['final_atom_positions'],
+              result['structure_module']['final_atom_mask'],
+              edge_contacts_thres=FLAGS.cluster_edge_thres,
+              superid2chainids=superid2chainids,
+            )
+            cluster_analysis_time = time.time() - cluster_analysis_time_start
+            cluster_time += time.time() - cluster_start
+
+            cluster_identities = []
+            for cluster in clus_res['clusters']:
+              cluster_identities.append([idx2chain_name[c] for c in cluster])
+
+            #print(f"Info: num_clusters = {clus_res['num_clusters']}, cluster_sizes = {clus_res['cluster_size']}, ",
+            #    f"clusters = {cluster_identities}\n")
           
         if FLAGS.benchmark:
           print("\nTiming Information:")
@@ -189,6 +193,7 @@ def main(argv):
           print(f"      * join_superchains_asym_id: {join_chains_time:.3f}s")
           print(f"    - Score calculation: {time.time() - score_start:.3f}s")
           print(f"      * interface_score: {interface_score_time:.3f}s")
+          print(f"    - Loop time: {time.time() - loop_start:.3f}s")
           if FLAGS.do_cluster_analysis:
             print(f"    - Cluster analysis: {time.time() - cluster_start:.3f}s")
             print(f"      * cluster_analysis: {cluster_analysis_time:.3f}s")
