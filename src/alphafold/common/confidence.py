@@ -24,6 +24,9 @@ from typing import Dict, Optional, Tuple, Union, List
 import numpy as np
 import scipy.special
 import networkx as nx
+import cupy as cp
+import cugraph
+import cudf
 
 
 def compute_plddt(logits: np.ndarray) -> np.ndarray:
@@ -35,12 +38,14 @@ def compute_plddt(logits: np.ndarray) -> np.ndarray:
   Returns:
     plddt: [num_res] per-residue pLDDT.
   """
-  num_bins = logits.shape[-1]
+  # Move computation to GPU
+  logits_gpu = cp.asarray(logits)
+  num_bins = logits_gpu.shape[-1]
   bin_width = 1.0 / num_bins
-  bin_centers = np.arange(start=0.5 * bin_width, stop=1.0, step=bin_width)
-  probs = scipy.special.softmax(logits, axis=-1)
-  predicted_lddt_ca = np.sum(probs * bin_centers[None, :], axis=-1)
-  return predicted_lddt_ca * 100
+  bin_centers = cp.arange(start=0.5 * bin_width, stop=1.0, step=bin_width)
+  probs = cp.special.softmax(logits_gpu, axis=-1)
+  predicted_lddt_ca = cp.sum(probs * bin_centers[None, :], axis=-1)
+  return cp.asnumpy(predicted_lddt_ca * 100)
 
 
 def _calculate_bin_centers(breaks: np.ndarray):
@@ -52,12 +57,13 @@ def _calculate_bin_centers(breaks: np.ndarray):
   Returns:
     bin_centers: [num_bins] the error bin centers.
   """
-  step = (breaks[1] - breaks[0])
+  breaks_gpu = cp.asarray(breaks)
+  step = (breaks_gpu[1] - breaks_gpu[0])
 
   # Add half-step to get the center
-  bin_centers = breaks + step / 2
+  bin_centers = breaks_gpu + step / 2
   # Add a catch-all bin at the end.
-  bin_centers = np.concatenate([bin_centers, [bin_centers[-1] + step]],
+  bin_centers = cp.concatenate([bin_centers, [bin_centers[-1] + step]],
                                axis=0)
   return bin_centers
 
@@ -77,11 +83,14 @@ def _calculate_expected_aligned_error(
       error for each pair of residues.
     max_predicted_aligned_error: The maximum predicted error possible.
   """
-  bin_centers = _calculate_bin_centers(alignment_confidence_breaks)
-
-  # Tuple of expected aligned distance error and max possible error.
-  return (np.sum(aligned_distance_error_probs * bin_centers, axis=-1),
-          np.asarray(bin_centers[-1]))
+  breaks_gpu = cp.asarray(alignment_confidence_breaks)
+  probs_gpu = cp.asarray(aligned_distance_error_probs)
+  
+  bin_centers = _calculate_bin_centers(breaks_gpu)
+  expected_error = cp.sum(probs_gpu * bin_centers, axis=-1)
+  max_error = bin_centers[-1]
+  
+  return cp.asnumpy(expected_error), cp.asnumpy(max_error)
 
 
 def compute_predicted_aligned_error(
@@ -101,15 +110,17 @@ def compute_predicted_aligned_error(
       error for each pair of residues.
     max_predicted_aligned_error: The maximum predicted error possible.
   """
-  aligned_confidence_probs = scipy.special.softmax(
-      logits,
-      axis=-1)
+  logits_gpu = cp.asarray(logits)
+  breaks_gpu = cp.asarray(breaks)
+  
+  aligned_confidence_probs = cp.special.softmax(logits_gpu, axis=-1)
   predicted_aligned_error, max_predicted_aligned_error = (
       _calculate_expected_aligned_error(
-          alignment_confidence_breaks=breaks,
+          alignment_confidence_breaks=breaks_gpu,
           aligned_distance_error_probs=aligned_confidence_probs))
+          
   return {
-      'aligned_confidence_probs': aligned_confidence_probs,
+      'aligned_confidence_probs': cp.asnumpy(aligned_confidence_probs),
       'predicted_aligned_error': predicted_aligned_error,
       'max_predicted_aligned_error': max_predicted_aligned_error,
   }
@@ -121,60 +132,39 @@ def predicted_tm_score(
     residue_weights: Optional[np.ndarray] = None,
     asym_id: Optional[np.ndarray] = None,
     interface: bool = False) -> np.ndarray:
-  """Computes predicted TM alignment or predicted interface TM alignment score.
-
-  Args:
-    logits: [num_res, num_res, num_bins] the logits output from
-      PredictedAlignedErrorHead.
-    breaks: [num_bins] the error bins.
-    residue_weights: [num_res] the per residue weights to use for the
-      expectation.
-    asym_id: [num_res] the asymmetric unit ID - the chain ID. Only needed for
-      ipTM calculation, i.e. when interface=True.
-    interface: If True, interface predicted TM score is computed.
-
-  Returns:
-    ptm_score: The predicted TM alignment or the predicted iTM score.
-  """
-
-  # residue_weights has to be in [0, 1], but can be floating-point, i.e. the
-  # exp. resolved head's probability.
+  """Computes predicted TM alignment or predicted interface TM alignment score."""
+  # Move computation to GPU
+  logits_gpu = cp.asarray(logits)
+  
   if residue_weights is None:
     residue_weights = np.ones(logits.shape[0])
+  residue_weights_gpu = cp.asarray(residue_weights)
 
   bin_centers = _calculate_bin_centers(breaks)
 
-  #test commit
-
-  num_res = int(np.sum(residue_weights))
-  # Clip num_res to avoid negative/undefined d0.
+  num_res = int(cp.sum(residue_weights_gpu))
   clipped_num_res = max(num_res, 19)
 
-  # Compute d_0(num_res) as defined by TM-score, eqn. (5) in Yang & Skolnick
-  # "Scoring function for automated assessment of protein structure template
-  # quality", 2004: http://zhanglab.ccmb.med.umich.edu/papers/2004_3.pdf
   d0 = 1.24 * (clipped_num_res - 15) ** (1./3) - 1.8
 
-  # Convert logits to probs.
-  probs = scipy.special.softmax(logits, axis=-1)
+  probs = cp.special.softmax(logits_gpu, axis=-1)
 
-  # TM-Score term for every bin.
-  tm_per_bin = 1. / (1 + np.square(bin_centers) / np.square(d0))
-  # E_distances tm(distance).
-  predicted_tm_term = np.sum(probs * tm_per_bin, axis=-1)
+  tm_per_bin = 1. / (1 + cp.square(bin_centers) / cp.square(d0))
+  predicted_tm_term = cp.sum(probs * tm_per_bin, axis=-1)
 
-  pair_mask = np.ones(shape=(num_res, num_res), dtype=bool)
+  pair_mask = cp.ones(shape=(num_res, num_res), dtype=bool)
   if interface:
-    pair_mask *= asym_id[:, None] != asym_id[None, :]
+    asym_id_gpu = cp.asarray(asym_id)
+    pair_mask *= asym_id_gpu[:, None] != asym_id_gpu[None, :]
 
   predicted_tm_term *= pair_mask
 
   pair_residue_weights = pair_mask * (
-      residue_weights[None, :] * residue_weights[:, None])
-  normed_residue_mask = pair_residue_weights / (1e-8 + np.sum(
+      residue_weights_gpu[None, :] * residue_weights_gpu[:, None])
+  normed_residue_mask = pair_residue_weights / (1e-8 + cp.sum(
       pair_residue_weights, axis=-1, keepdims=True))
-  per_alignment = np.sum(predicted_tm_term * normed_residue_mask, axis=-1)
-  return np.asarray(per_alignment[(per_alignment * residue_weights).argmax()])
+  per_alignment = cp.sum(predicted_tm_term * normed_residue_mask, axis=-1)
+  return cp.asnumpy(per_alignment[(per_alignment * residue_weights_gpu).argmax()])
 
 def predicted_tm_score_v1(
     logits: np.ndarray,
@@ -183,67 +173,53 @@ def predicted_tm_score_v1(
     is_probs: Optional[bool] = False,
     chain_mask: Optional[np.ndarray] = None,
     inter_chain_mask: Optional[np.ndarray] = None) -> np.ndarray:
-  """Computes predicted TM alignment score.
+  """Computes predicted TM alignment score."""
+  # Move computation to GPU
+  if not is_probs:
+    logits_gpu = cp.asarray(logits)
+  else:
+    logits_gpu = cp.asarray(logits)
 
-  Args:
-    logits: [num_res, num_res, num_bins] the logits output from
-      PredictedAlignedErrorHead.
-    breaks: [num_bins] the error bins.
-    residue_weights: [num_res] the per residue weights to use for the
-      expectation.
-
-  Returns:
-    ptm_score: the predicted TM alignment score.
-  """
-  # residue_weights has to be in [0, 1], but can be floating-point, i.e. the
-  # exp. resolved head's probability.
   if residue_weights is None:
     residue_weights = np.ones(logits.shape[0])
+  residue_weights_gpu = cp.asarray(residue_weights)
 
   bin_centers = _calculate_bin_centers(breaks)
 
-  num_res = np.sum(residue_weights)
-  # Clip num_res to avoid negative/undefined d0.
+  num_res = cp.sum(residue_weights_gpu)
   clipped_num_res = max(num_res, 19)
 
-  # Compute d_0(num_res) as defined by TM-score, eqn. (5) in
-  # http://zhanglab.ccmb.med.umich.edu/papers/2004_3.pdf
-  # Yang & Skolnick "Scoring function for automated
-  # assessment of protein structure template quality" 2004
   d0 = 1.24 * (clipped_num_res - 15) ** (1./3) - 1.8
 
-  # this may help interface prediction
-  if d0 < 0.5: d0 = 0.02*num_res
+  if d0 < 0.5: 
+    d0 = 0.02 * num_res
 
-  # Convert logits to probs
   if not is_probs:
-    probs = scipy.special.softmax(logits, axis=-1)
+    probs = cp.special.softmax(logits_gpu, axis=-1)
   else:
-    probs = logits
+    probs = logits_gpu
 
-  # TM-Score term for every bin
-  tm_per_bin = 1. / (1 + np.square(bin_centers) / np.square(d0))
-  # E_distances tm(distance)
-  predicted_tm_term = np.sum(probs * tm_per_bin, axis=-1)
+  tm_per_bin = 1. / (1 + cp.square(bin_centers) / cp.square(d0))
+  predicted_tm_term = cp.sum(probs * tm_per_bin, axis=-1)
 
-  # for interface-score
   if inter_chain_mask is not None:
-      predicted_tm_term = predicted_tm_term * inter_chain_mask
+    inter_chain_mask_gpu = cp.asarray(inter_chain_mask)
+    predicted_tm_term = predicted_tm_term * inter_chain_mask_gpu
 
-  normed_residue_mask = residue_weights / (1e-8 + residue_weights.sum())
+  normed_residue_mask = residue_weights_gpu / (1e-8 + residue_weights_gpu.sum())
 
   if chain_mask is not None:
-      per_alignment = np.sum(predicted_tm_term * normed_residue_mask * chain_mask, axis=-1)
-      return np.asarray(per_alignment[(per_alignment * residue_weights).argmax()])
+    chain_mask_gpu = cp.asarray(chain_mask)
+    per_alignment = cp.sum(predicted_tm_term * normed_residue_mask * chain_mask_gpu, axis=-1)
+    return cp.asnumpy(per_alignment[(per_alignment * residue_weights_gpu).argmax()])
   else:
-      per_alignment = np.sum(predicted_tm_term * normed_residue_mask, axis=-1)
-      return np.asarray(per_alignment[(per_alignment * residue_weights).argmax()])
+    per_alignment = cp.sum(predicted_tm_term * normed_residue_mask, axis=-1)
+    return cp.asnumpy(per_alignment[(per_alignment * residue_weights_gpu).argmax()])
 
 
 def predicted_interface_tm_score(
     logits: np.ndarray,
     breaks: np.ndarray,
-    # residue_indices: np.ndarray,
     pos: np.ndarray,
     atom_mask: np.ndarray,
     asym_id: np.ndarray,
@@ -251,35 +227,9 @@ def predicted_interface_tm_score(
     distance_threshold: Optional[int] = 4.5,
     is_probs: Optional[bool] = False,
     inter_chain_mask: Optional[np.ndarray] = None) -> Dict[str, Union[np.ndarray, int]]:
-
-  """Computes predicted interfacial TM-score using only the residues
-    that make up the interface between different chains in a protein
-    complex (piTM)
-
-    Score defined in the AF2Complex manuscript (2021)
-
-  Args:
-    logits: [num_res, num_res, num_bins] the logits output from
-      PredictedAlignedErrorHead.
-    breaks: [num_bins] the error bins.
-    residue_indices: [num_res] index of each residue
-    pos: [num_res, atom_type_num, 3] the predicted atom positions
-    atom_mask: mask for atoms (each residue type has different number of atoms)
-    residue_weights: [num_res] the per residue weights to use for the
-      expectation.
-    distance_threshold: maximum distance between two residue's heavy atoms
-      from different chains to be considered in the interface
-    is_probs: boolean indicating whether the logits argument are probabilities
-
-  Returns:
-    None if target is a single chain, otherwise
-    pitm_dict: dict of np.ndarrays containing
-      "score" - piTM score for the sequence
-      "num_residues" - number of residues in the interface
-      "num_contacts" - number of contacts along the interface of protein complex
-
-  """
-  # only calculate piTMS if a multi-chain target
+  """Computes predicted interfacial TM-score using GPU acceleration."""
+  
+  # Only calculate piTMS if a multi-chain target
   if np.all(asym_id == asym_id[0]):
     return {
       'score': np.asarray(0),
@@ -290,7 +240,7 @@ def predicted_interface_tm_score(
   residue_mask, contact_mask = get_residue_and_contact_masks(
       asym_id, pos, atom_mask, distance_threshold)
 
-  # return 0.0 if no inter-chain contacts found
+  # Return 0.0 if no inter-chain contacts found
   if residue_mask.sum() == 0:
     return {
       'score': np.asarray(0),
@@ -298,17 +248,17 @@ def predicted_interface_tm_score(
       'num_contacts': np.asarray(0, dtype=np.int32),
     }
 
-  # select only interfacial residues
+  # Select only interfacial residues
   if residue_weights is None:
     residue_weights = np.ones(logits.shape[0])
   residue_weights = residue_weights * residue_mask
 
-  # return the  piTM score and other interface data
+  # Return the piTM score and other interface data
   return {
     'score': predicted_tm_score_v1(logits, breaks, residue_weights,
         is_probs=is_probs, inter_chain_mask=inter_chain_mask),
-    'num_residues': np.asarray( residue_mask.sum() ),
-    'num_contacts': np.asarray( contact_mask.sum() ),
+    'num_residues': np.asarray(residue_mask.sum()),
+    'num_contacts': np.asarray(contact_mask.sum()),
   }
 
 def make_tm_score_masks(asym_id):
@@ -501,117 +451,105 @@ def calculate_interface_score(
   return score
   
 def get_residue_and_contact_masks(
-    asym_id: np.array,
+    asym_id: np.ndarray,
     pos: np.ndarray,
     atom_mask: np.ndarray,
     distance_threshold: Optional[float] = 4.5,):
-  """Computes the residue and contact masks
+  """Computes the residue and contact masks using GPU acceleration."""
+  
+  # Move data to GPU
+  pos_gpu = cp.asarray(pos)
+  atom_mask_gpu = cp.asarray(atom_mask)
+  
+  num_res = pos.shape[0]
+  residue_mask = cp.zeros(num_res, dtype=bool)
+  contact_mask = cp.zeros((num_res, num_res), dtype=bool)
 
-  Args:
-    asym_id: [num_res] a unique integer per chain indicating the chain number.
-      The ordering of the input chains is arbitrary (As defined by AF-Multimer
-      paper)
-    pos: [num_res, atom_type_num, 3] the predicted atom positions
-    atom_mask: mask for atoms (each residue type has different number of atoms)
-    distance_threshold: maximum distance between two residue's heavy atoms
-      from different chains to be considered in the interface
-
-  Returns:
-    residue_mask - [num_res] array indicating if a residue is in the interface
-      of the complex.
-    contact_mask - [num_res, num_res] 2D array indicating which residues are
-      in contact with each other (only for interface residues)
-  """
-
-  residue_mask = np.zeros(pos.shape[0]).astype(bool)
-  contact_mask = np.zeros((pos.shape[0], pos.shape[0])).astype(bool)
-
-  # calculates the minimum distance between each residue's heavy atoms
   def get_min_pairwise_dist(a, b, mask_a, mask_b):
     a = a[mask_a > 0.5]
     b = b[mask_b > 0.5]
-    pairwise_dist = scipy.spatial.distance.cdist(a, b, metric='euclidean')
-    return pairwise_dist.min()
-
-  for i in range(pos.shape[0]):
-      for j in range(i+1, pos.shape[0]):  # use symmetry
-          if asym_id[i] != asym_id[j]:
-              if atom_mask[i].sum() == 0 or atom_mask[j].sum() == 0:
-                  continue
-              dist = get_min_pairwise_dist(pos[i], pos[j], atom_mask[i], atom_mask[j])
-              residue_mask[i] = residue_mask[i] or dist < distance_threshold
-              residue_mask[j] = residue_mask[j] or dist < distance_threshold
-              contact_mask[i, j] = contact_mask[i, j] or dist < distance_threshold
-  return residue_mask, contact_mask
-
-################################################################################
-def cluster_analysis(
-  asym_id: np.ndarray,
-  pos: np.ndarray,
-  atom_mask: np.ndarray,
-  distance_threshold: Optional[float] = 4.5,
-  edge_contacts_thres: Optional[int] = 10,
-  superid2chainids: Optional[Dict[int, List[int]]] = None,
-  ) -> Tuple[int, int]:
-  """Computes information about clusters of protein chains in the results.
-
-  Args:
-    asym_id: [num_res] a unique integer per chain indicating the chain number.
-      The ordering of the input chains is arbitrary (As defined by AF-Multimer
-      paper)
-    pos: [num_res, atom_type_num, 3] the predicted atom positions
-    atom_mask: mask for atoms (each residue type has different number of atoms)
-    distance_threshold: maximum distance between two residue's heavy atoms
-      from different chains to be considered in the interface
-    edge_contact_thres: number for contacts between chains for two chains to
-      be considered adjacent in the connectivity graph
-
-  Returns:
-    clus_res_dict: dict of np.ndarrays containing
-      "num_clusters" - number of clusters in the result protein complex prediction
-      "cluster_size" - list of the number of chains in each cluster
-      "clusters" - indices of chains for each cluster
-  """
-
-  asym_id = asym_id.astype(int)
-  res_mask, contact_mask = get_residue_and_contact_masks(
-    asym_id, pos, atom_mask, distance_threshold)
-
-  num_chains = asym_id.max() + 1
-  num_res = len(asym_id)
-  chain_adj_count = np.zeros((num_chains, num_chains))
-
-  resid2asymid = {k: v for k, v in enumerate(asym_id)}
+    # Efficient GPU pairwise distance computation
+    diff = a[:, None, :] - b[None, :, :]
+    dist_sq = cp.sum(diff * diff, axis=2)
+    return cp.sqrt(cp.min(dist_sq))
 
   for i in range(num_res):
       for j in range(i+1, num_res):  # use symmetry
+          if asym_id[i] != asym_id[j]:
+              if atom_mask_gpu[i].sum() == 0 or atom_mask_gpu[j].sum() == 0:
+                  continue
+              dist = get_min_pairwise_dist(
+                  pos_gpu[i], pos_gpu[j],
+                  atom_mask_gpu[i], atom_mask_gpu[j])
+              is_contact = dist < distance_threshold
+              residue_mask[i] = residue_mask[i] or is_contact
+              residue_mask[j] = residue_mask[j] or is_contact
+              contact_mask[i, j] = contact_mask[i, j] or is_contact
+
+  return cp.asnumpy(residue_mask), cp.asnumpy(contact_mask)
+
+################################################################################
+def cluster_analysis(
+    asym_id: np.ndarray,
+    pos: np.ndarray,
+    atom_mask: np.ndarray,
+    distance_threshold: Optional[float] = 4.5,
+    edge_contacts_thres: Optional[int] = 10,
+    superid2chainids: Optional[Dict[int, List[int]]] = None,
+) -> Dict[str, Union[int, List[int], List[List[int]]]]:
+  """Computes information about clusters using GPU acceleration."""
+  asym_id = asym_id.astype(int)
+  res_mask, contact_mask = get_residue_and_contact_masks(
+      asym_id, pos, atom_mask, distance_threshold)
+
+  num_chains = int(asym_id.max() + 1)
+  num_res = len(asym_id)
+  chain_adj_count = cp.zeros((num_chains, num_chains))
+
+  resid2asymid = {k: v for k, v in enumerate(asym_id)}
+
+  # Compute chain adjacency matrix on GPU
+  for i in range(num_res):
+      for j in range(i+1, num_res):
           asym_id_a = resid2asymid[i]
           asym_id_b = resid2asymid[j]
           if asym_id_a != asym_id_b:
-            chain_adj_count[asym_id_a, asym_id_b] += contact_mask[i, j]
+              chain_adj_count[asym_id_a, asym_id_b] += contact_mask[i, j]
 
-  chain_adj_mat = chain_adj_count > edge_contacts_thres
-  chain_adj_mat = np.bitwise_or(chain_adj_mat, chain_adj_mat.T)
-  graph = nx.from_numpy_matrix(chain_adj_mat)
-  connected_components = nx.connected_components(graph)
-  num_clusters = 0
-  cluster_size = []
+  chain_adj_mat = cp.asnumpy(chain_adj_count > edge_contacts_thres)
+  chain_adj_mat = np.logical_or(chain_adj_mat, chain_adj_mat.T)
+
+  # Create CuGraph from adjacency matrix
+  G = cugraph.Graph()
+  edges = np.where(chain_adj_mat)
+  G.from_cudf_edgelist(
+      cudf.DataFrame({
+          'src': edges[0],
+          'dst': edges[1]
+      })
+  )
+
+  # Find connected components
+  components = cugraph.connected_components(G)
+  labels = components.values_host
+
+  # Process results
+  unique_labels = np.unique(labels)
+  num_clusters = len(unique_labels)
   clusters = []
-  for c in connected_components:
-    num_clusters += 1
-    cluster_size.append(len(c))
-    clusters.append(list(c))
+  cluster_size = []
 
-  if superid2chainids: # adjust chain_sizes
-    cluster_size = []
-    for c in clusters:
-      size = 0
-      for i in c:
-        size += len(superid2chainids[i])
+  for label in unique_labels:
+      cluster = np.where(labels == label)[0].tolist()
+      clusters.append(cluster)
+      if superid2chainids:
+          size = sum(len(superid2chainids[i]) for i in cluster)
+      else:
+          size = len(cluster)
       cluster_size.append(size)
 
   return {
-    'num_clusters': num_clusters,
-    'cluster_size': cluster_size,
-    'clusters': clusters,
+      'num_clusters': num_clusters,
+      'cluster_size': cluster_size,
+      'clusters': clusters,
   }
