@@ -138,7 +138,7 @@ def main(argv):
 
         loop_start = time.time()
 
-        for i in range(0, 100):
+        for i in range(0, 1000):
 
           # Time feature processing
           feat_start = time.time() 
@@ -194,19 +194,6 @@ def main(argv):
 
             #print(f"Info: num_clusters = {clus_res['num_clusters']}, cluster_sizes = {clus_res['cluster_size']}, ",
             #    f"clusters = {cluster_identities}\n")
-          
-        if FLAGS.benchmark:
-          print("\nTiming Information:")
-          print(f"  Model processing time: {time.time() - model_start:.3f}s")
-          print(f"    - Pickle loading: {pkl_time:.3f}s")
-          print(f"    - Feature processing: {feature_time:.3f}s")
-          print(f"      * join_superchains_asym_id: {join_chains_time:.3f}s")
-          print(f"    - Score calculation: {score_time:.3f}s")
-          print(f"      * interface_score: {interface_score_time:.3f}s")
-          print(f"    - Loop time: {time.time() - loop_start:.3f}s")
-          if FLAGS.do_cluster_analysis:
-            print(f"    - Cluster analysis: {cluster_time:.3f}s")
-            print(f"      * cluster_analysis: {cluster_analysis_time:.3f}s")
 
         '''
         fields   = model_name.split('_')
