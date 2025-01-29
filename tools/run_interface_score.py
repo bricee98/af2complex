@@ -73,15 +73,18 @@ def main(argv):
     raise app.UsageError('Too many command-line arguments.')
 
   start_time = time.time()
-  target_read_time = 0
-  feature_time = 0
-  score_calc_time = 0
-  cluster_time = 0
+  # Initialize timing variables at the global scope
+  global_times = {
+    'target_read': 0,
+    'feature_processing': 0, 
+    'score_calculation': 0,
+    'cluster_analysis': 0
+  }
 
   # read list of target files to update with pITM metrics
   read_start = time.time()
   target_lst = af2c.read_af2c_target_file( FLAGS.target_lst_path )
-  target_read_time = time.time() - read_start
+  global_times['target_read'] = time.time() - read_start
 
   for target in target_lst:
     # if complex features were not saved, rebuild them
@@ -135,14 +138,15 @@ def main(argv):
 
         loop_start = time.time()
 
-        for i in range(0, 1):
+        for i in range(0, 100):
 
           # Time feature processing
           feat_start = time.time() 
           join_chains_time_start = time.time()
           super_asym_id, superid2chainids = confidence.join_superchains_asym_id(asym_id, target['asym_id_list'])
           join_chains_time = time.time() - join_chains_time_start
-          feature_time += time.time() - feat_start
+          feature_time = time.time() - feat_start
+          global_times['feature_processing'] += feature_time
 
           # Time interface score calculation
           score_start = time.time()
@@ -156,7 +160,8 @@ def main(argv):
             distance_threshold=FLAGS.interface_dist_thres,
             is_probs=True)
           interface_score_time = time.time() - interface_score_time_start
-          score_calc_time += time.time() - score_start
+          score_time = time.time() - score_start
+          global_times['score_calculation'] += score_time
 
           ptm = result['ptm'].tolist()
           pitm = result['pitm']['score'].tolist()
@@ -180,7 +185,8 @@ def main(argv):
               superid2chainids=superid2chainids,
             )
             cluster_analysis_time = time.time() - cluster_analysis_time_start
-            cluster_time += time.time() - cluster_start
+            cluster_time = time.time() - cluster_start
+            global_times['cluster_analysis'] += cluster_time
 
             cluster_identities = []
             for cluster in clus_res['clusters']:
@@ -193,13 +199,13 @@ def main(argv):
           print("\nTiming Information:")
           print(f"  Model processing time: {time.time() - model_start:.3f}s")
           print(f"    - Pickle loading: {pkl_time:.3f}s")
-          print(f"    - Feature processing: {time.time() - feat_start:.3f}s")
+          print(f"    - Feature processing: {feature_time:.3f}s")
           print(f"      * join_superchains_asym_id: {join_chains_time:.3f}s")
-          print(f"    - Score calculation: {time.time() - score_start:.3f}s")
+          print(f"    - Score calculation: {score_time:.3f}s")
           print(f"      * interface_score: {interface_score_time:.3f}s")
           print(f"    - Loop time: {time.time() - loop_start:.3f}s")
           if FLAGS.do_cluster_analysis:
-            print(f"    - Cluster analysis: {time.time() - cluster_start:.3f}s")
+            print(f"    - Cluster analysis: {cluster_time:.3f}s")
             print(f"      * cluster_analysis: {cluster_analysis_time:.3f}s")
 
         '''
@@ -235,11 +241,11 @@ def main(argv):
     total_time = time.time() - start_time
     print("\nOverall Timing Summary:")
     print(f"Total execution time: {total_time:.3f}s")
-    print(f"Target file reading: {target_read_time:.3f}s")
-    print(f"Feature processing total: {feature_time:.3f}s")
-    print(f"Score calculation total: {score_calc_time:.3f}s")
+    print(f"Target file reading: {global_times['target_read']:.3f}s")
+    print(f"Feature processing total: {global_times['feature_processing']:.3f}s")
+    print(f"Score calculation total: {global_times['score_calculation']:.3f}s")
     if FLAGS.do_cluster_analysis:
-      print(f"Cluster analysis total: {cluster_time:.3f}s")
+      print(f"Cluster analysis total: {global_times['cluster_analysis']:.3f}s")
 
 if __name__ == '__main__':
   flags.mark_flags_as_required([
